@@ -1,12 +1,9 @@
-version: '3.8'
-
-# Общие настройки для Airflow
 x-airflow-common: &airflow-common
   build:
-    context: ./airflow
+    context: .
     dockerfile: Dockerfile
   environment: &airflow-common-env
-    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor #локальный запуск
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
     AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
     AIRFLOW__CORE__FERNET_KEY: ''
@@ -18,59 +15,22 @@ x-airflow-common: &airflow-common
     _PIP_ADDITIONAL_REQUIREMENTS: ''
     AIRFLOW_INPUT_DIR: '/opt/airflow/dag-inputs'
   volumes:
-    - ./airflow/dags:/opt/airflow/dags
-    - ./airflow/dags/sql:/opt/airflow/dags/sql
-    - ./airflow/requirements.txt:/opt/airflow/requirements.txt
-    - ./airflow/data:/opt/airflow/data
+    - ./dags:/opt/airflow/dags
+    - ./dags/sql:/opt/airflow/dags/sql
+    - ./requirements.txt:/opt/airflow/requirements.txt
+    - ./data:/opt/airflow/data
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on: &airflow-common-depends-on
     postgres:
       condition: service_healthy
   networks:
-    - bionicpro_network
+    - dag_sample
 
 services:
-  # Keycloak Database
-  keycloak_db:
-    image: postgres:14
-    environment:
-      POSTGRES_DB: keycloak_db
-      POSTGRES_USER: keycloak_user
-      POSTGRES_PASSWORD: keycloak_password
-    volumes:
-      - ./postgres-keycloak-data:/var/lib/postgresql/data
-    ports:
-      - "5433:5432"
-    networks:
-      - bionicpro_network
-
-  # Keycloak Authentication
-  keycloak:
-    image: quay.io/keycloak/keycloak:21.1
-    environment:
-      KEYCLOAK_ADMIN: admin
-      KEYCLOAK_ADMIN_PASSWORD: admin
-      KC_DB: postgres
-      KC_DB_URL: jdbc:postgresql://keycloak_db:5432/keycloak_db
-      KC_DB_USERNAME: keycloak_user
-      KC_DB_PASSWORD: keycloak_password
-    command: 
-      - start-dev
-      - --import-realm
-    volumes:
-      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json
-    ports:
-      - "8080:8080"
-    depends_on:
-      - keycloak_db
-    networks:
-      - bionicpro_network
-
-  # Main PostgreSQL Database (for Airflow and Backend)
   postgres:
     image: postgres:16.0
     volumes:
-      - ./airflow/db/init-db.sql:/docker-entrypoint-initdb.d/db.sql
+      - ./db/init-db.sql:/docker-entrypoint-initdb.d/db.sql
     environment:
       POSTGRES_USER: airflow
       POSTGRES_PASSWORD: airflow
@@ -89,69 +49,32 @@ services:
       retries: 5
       start_period: 5s
     restart: always
-    ports:
-      - "5432:5432"
     networks:
-      - bionicpro_network
+      - dag_sample
 
-  # Backend API
-  backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    ports:
-      - "8000:8000"
-    environment:
-      - DB_HOST=postgres
-      - DB_PORT=5432
-      - DB_NAME=airflow
-      - DB_USER=airflow
-      - DB_PASSWORD=airflow
-      - KEYCLOAK_URL=http://host.docker.internal:8080
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - bionicpro_network
-
-  # Frontend React App
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    ports:
-      - "3000:3000"
-    environment:
-      REACT_APP_API_URL: http://localhost:8000
-      REACT_APP_KEYCLOAK_URL: http://localhost:8080
-      REACT_APP_KEYCLOAK_REALM: reports-realm
-      REACT_APP_KEYCLOAK_CLIENT_ID: reports-frontend
-    depends_on:
-      - backend
-      - keycloak
-    networks:
-      - bionicpro_network
-
-  # Airflow Webserver
   airflow-webserver:
     <<: *airflow-common
+
     ports:
-      - "8081:8080"  # Изменен порт, чтобы не конфликтовать с Keycloak
+      - "8080:8080"
     depends_on:
       postgres:
         condition: service_healthy
       airflow-init:
         condition: service_completed_successfully
     command: webserver
+    networks:
+      - dag_sample
     healthcheck:
       test: [ "CMD-SHELL", "curl -f http://localhost:8080/health || exit 1" ]
       interval: 30s
       timeout: 10s
       retries: 3
 
-  # Airflow Scheduler
   airflow-scheduler:
     <<: *airflow-common
+    networks:
+      - dag_sample
     command: scheduler
     depends_on:
       postgres:
@@ -164,7 +87,6 @@ services:
       timeout: 10s
       retries: 3
 
-  # Airflow Triggerer
   airflow-triggerer:
     <<: *airflow-common
     depends_on:
@@ -172,6 +94,8 @@ services:
         condition: service_healthy
       airflow-init:
         condition: service_completed_successfully
+    networks:
+      - dag_sample
     command: bash -c "airflow triggerer"
     healthcheck:
       test:
@@ -183,12 +107,13 @@ services:
       start_period: 30s
     restart: always
 
-  # Airflow CLI (for debugging)
   airflow-cli:
     <<: *airflow-common
     depends_on:
       postgres:
         condition: service_healthy
+    networks:
+      - dag_sample
     profiles:
       - debug
     command:
@@ -196,18 +121,17 @@ services:
       - -c
       - airflow
 
-  # Airflow Initialization
   airflow-init:
     <<: *airflow-common
     depends_on:
       postgres:
         condition: service_healthy
     command: >
-      bash -c "airflow db init && airflow users create --username admin --firstname admin --lastname admin --role Admin --email admin@sample.ru --password admin"
+      bash -c " airflow db init && airflow users create \ --username admin \ --firstname admin \ --lastname admin \ --role Admin \ --email admin@sample.ru \ --password admin 
+      
+      "
+    networks:
+      - dag_sample
 
 networks:
-  bionicpro_network:
-    driver: bridge
-
-volumes:
-  postgres_data:
+  dag_sample:
